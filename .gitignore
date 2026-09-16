@@ -1,0 +1,27 @@
+﻿# dependencies
+node_modules/
+frontend/node_modules/
+
+# build output
+dist/
+frontend/dist/
+
+# python / tests
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/__pycache__/
+
+# env / secrets
+.env
+.env.*
+*.key
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+*.log
+
+# vite
+frontend/.vite/
