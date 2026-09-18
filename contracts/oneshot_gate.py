@@ -88,13 +88,17 @@ class OneShotGate(gl.Contract):
         aid = agreement_id
         assert self.ag_exists.get(aid, False), "agreement does not exist"
 
-        src = source.strip().lower()
+        # Ask 1 — bind the source to the ACTUAL transaction sender. A caller can
+        # only ever submit as itself; the passed `source` arg is ignored for auth
+        # so no one can spoof an authorized address they do not control.
+        caller = gl.message.sender_address.as_hex.lower()
+        src = caller
         allowed = self.ag_authorized_sources.get(aid, "")
         is_auth = False
         for a in allowed.split(","):
             if a == src and a != "":
                 is_auth = True
-        assert is_auth, "source contract not authorized on this agreement"
+        assert is_auth, "caller is not an authorized source on this agreement"
 
         idx = u256(int(self.op_count) + 1)
         self.op_count = idx
@@ -104,6 +108,10 @@ class OneShotGate(gl.Contract):
         obl = obligation_ref.strip().lower()
         inc = incident_id.strip().lower()
         collision_key = obl if obl != "" else inc
+        # Ask 2 — every payout MUST carry an obligation or incident reference to
+        # pair on. A blank-and-blank reference would skip comparison entirely and
+        # let a duplicate slip through as CLEAR_NEW, so it is rejected.
+        assert collision_key != "", "operation must carry an obligation_ref or incident_id to be checked for collisions"
 
         self.op_exists[oid] = True
         self.op_agreement[oid] = aid
@@ -120,17 +128,21 @@ class OneShotGate(gl.Contract):
         self.op_escalated[oid] = False
 
         prior_id = ""
-        if collision_key != "":
-            bkey = aid + "|" + collision_key + "|" + rcpt
-            prior_ids_raw = self.bucket_ops.get(bkey, "")
-            if prior_ids_raw != "":
-                for p in prior_ids_raw.split(","):
-                    if p.strip() != "":
-                        prior_id = p.strip()
-            if prior_ids_raw == "":
-                self.bucket_ops[bkey] = oid
-            else:
-                self.bucket_ops[bkey] = prior_ids_raw + "," + oid
+        bkey = aid + "|" + collision_key + "|" + rcpt
+        prior_ids_raw = self.bucket_ops.get(bkey, "")
+        if prior_ids_raw != "":
+            # pair against the FIRST prior in the bucket — the ORIGINAL operation
+            # that opened this obligation+recipient. Every later op is a candidate
+            # duplicate of that original, so a duplicate cannot be paired against a
+            # weaker/older-but-not-original entry to dodge a clean finding.
+            for p in prior_ids_raw.split(","):
+                if p.strip() != "":
+                    prior_id = p.strip()
+                    break
+        if prior_ids_raw == "":
+            self.bucket_ops[bkey] = oid
+        else:
+            self.bucket_ops[bkey] = prior_ids_raw + "," + oid
 
         if prior_id == "":
             self.op_state[oid] = "CLEAR_NEW"
@@ -287,7 +299,7 @@ Return ONLY one JSON object with these keys:
         prior_hint = self.op_entitlement_hint[prior_id]
 
         def build_prompt2() -> str:
-            return f"""You are an independent settlement auditor making a FINAL, BINDING decision on two payout operations generated from a human-language agreement. A first careful review already found this pair hard to separate and returned an unresolved result. You must now commit to the single best answer. "Ambiguous" is NOT an available answer this time. Choose the more defensible of exactly two options, based strictly on the governing agreement text.
+            return f"""You are an independent settlement auditor making a FINAL, BINDING decision on two payout operations generated from a human-language agreement. A first careful review already found this pair hard to separate and held it. You must now commit to the most defensible answer the agreement supports. Prefer to resolve it; declare a genuine deadlock only if the agreement truly cannot support either resolution, based strictly on the governing agreement text.
 
 GOVERNING AGREEMENT (locked, authoritative):
 {ag_text}
@@ -304,18 +316,19 @@ OPERATION B (the new operation being checked):
 - stated economic purpose: {new_purpose}
 - entitlement hint: {new_hint}
 
-Both pay the SAME recipient and reference the SAME obligation or incident. Decide, and COMMIT:
+Both pay the SAME recipient and reference the SAME obligation or incident. Decide, and COMMIT to the most defensible answer:
 - "duplicate" means A and B discharge the SAME entitlement; paying both double-pays one obligation, so B must NOT be paid.
 - "distinct" means A and B discharge DIFFERENT entitlements the agreement genuinely owes separately, so B should be paid.
+- "unresolved" means the governing agreement text genuinely does NOT provide enough basis to defend EITHER answer even after this forced review. Use it ONLY as a true last resort when committing to duplicate or distinct would require inventing terms the agreement does not contain. It is not the cautious default; it is the honest deadlock.
 
 Rules:
 - Base the decision on the AGREEMENT WORDING, not the operations' own labels.
 - Wording like "and" or "in addition to" between remedies favors distinct. Wording like "or", "in lieu of", or "sole remedy" favors duplicate.
 - If the agreement does not clearly define a SEPARATE entitlement that B discharges, the more defensible answer is duplicate (do not invent an entitlement the text does not grant).
-- You MUST choose duplicate or distinct. Do not answer ambiguous.
+- Strongly prefer duplicate or distinct. Choose "unresolved" ONLY when the agreement text truly cannot support either.
 
 Return ONLY one JSON object with these keys:
-- relationship: exactly "duplicate" or "distinct"
+- relationship: exactly "duplicate", "distinct", or "unresolved"
 - new_entitlement: a short label of at most 8 words naming the entitlement operation B discharges
 - prior_entitlement: a short label of at most 8 words naming the entitlement operation A discharges
 - reasoning: 1 to 2 sentences grounded in the specific agreement wording, explaining the final call
@@ -323,16 +336,17 @@ Return ONLY one JSON object with these keys:
 
         task2 = (
             "Make the final binding call: do the two operations discharge the "
-            "same entitlement (duplicate) or two distinct entitlements "
-            "(distinct), based only on the governing agreement. Commit to one; "
-            "ambiguous is not allowed. Output one JSON object."
+            "same entitlement (duplicate), two distinct entitlements (distinct), "
+            "or does the agreement genuinely fail to support either even under "
+            "this forced review (unresolved). Strongly prefer duplicate or "
+            "distinct. Output one JSON object."
         )
         criteria2 = (
             "The response is exactly one valid JSON object with keys "
             "relationship, new_entitlement, prior_entitlement, reasoning, "
-            "minority_note. relationship is exactly duplicate or distinct and "
-            "nothing else. reasoning is a non-empty string that refers to the "
-            "agreement wording."
+            "minority_note. relationship is exactly duplicate, distinct, or "
+            "unresolved and nothing else. reasoning is a non-empty string that "
+            "refers to the agreement wording."
         )
 
         raw = gl.eq_principle.prompt_non_comparative(
@@ -369,7 +383,14 @@ Return ONLY one JSON object with these keys:
             # purpose of escalation, which is to RESOLVE a held operation.
             state = "CONFIRMED_DUPLICATE"
         else:
+            # relationship == "unresolved" (or any non-committal answer): the
+            # agreement genuinely cannot settle this even under forcing. This is
+            # the REACHABLE deadlock — the operation moves to HELD_FINAL, which
+            # is resolvable only by the two named agreement parties acting
+            # jointly. There is no owner or operator override.
             state = "HELD_FINAL"
+            if reasoning == "":
+                reasoning = "Forced consensus could not defend either duplicate or distinct on the agreement text. Moved to final hold; resolvable only by joint release of the two named agreement parties."
 
         self.op_state[oid] = state
         self.op_entitlement[oid] = new_entitlement
@@ -380,24 +401,6 @@ Return ONLY one JSON object with these keys:
         self.op_minority[oid] = minority
 
         return state
-
-    # -----------------------------------------------------------------
-    # Deterministic escalation failure marker. If the forcing consensus
-    # pass itself cannot be relied upon (the write reverts on the client
-    # side after non-convergence), an authorized-free caller may record
-    # the deadlock explicitly so the ledger's two-party path unlocks.
-    # This ONLY moves a still-held, already-escalated op to HELD_FINAL.
-    # -----------------------------------------------------------------
-    @gl.public.write
-    def mark_deadlocked(self, op_id: str) -> str:
-        oid = op_id.strip()
-        assert self.op_exists.get(oid, False), "operation does not exist"
-        assert self.op_escalated.get(oid, False), "operation has not been escalated yet"
-        cur = self.op_state.get(oid, "")
-        assert cur == "POSSIBLE_DUPLICATE" or cur == "AMBIGUOUS", "only a still-held escalated op can be marked deadlocked"
-        self.op_state[oid] = "HELD_FINAL"
-        self.op_reasoning[oid] = "Escalation did not converge on a binding duplicate/distinct decision. Moved to final hold; resolvable only by joint release of the two named agreement parties."
-        return "HELD_FINAL"
 
     @gl.public.view
     def get_agreement(self, agreement_id: str) -> dict:

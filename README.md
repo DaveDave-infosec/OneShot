@@ -109,8 +109,8 @@ holds the money:
 
 | Contract | Address |
 |---|---|
-| Gate | `0x48206589c69d61220A73D20374B1A10e0c92aD9d` |
-| Ledger | `0xdc350cdE0F632Df308B5dbA21833C7B76F3FA3C5` |
+| Gate | `0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49` |
+| Ledger | `0x633EAC3F74cD645c8ECBe2F6284fFBf62FA1DC7f` |
 
 The ledger is constructed with the gate address baked in, so the linkage is
 fixed on-chain and a bystander can verify any decision against the gate directly.
@@ -119,13 +119,24 @@ fixed on-chain and a bystander can verify any decision against the gate directly
 
 ## Trust model
 
+- **Source bound to the caller.** An operation's source is bound to the actual
+  transaction sender, so a caller can only ever submit as itself. Passing an
+  authorized address you do not control does not help; the real caller is what
+  the authorization check reads.
+- **No duplicate can dodge comparison.** Every operation must carry an
+  obligation or incident reference, and a collision is paired against the first
+  (original) operation that opened the bucket. A duplicate cannot slip through
+  by blanking or changing its reference, or by being matched against a weaker,
+  later entry.
 - **No privileged settler.** `settle_operation` is permissionless. The state,
   recipient and amount all come from the gate cross-contract, never from the
   caller, so no one can fake a payout and the owner cannot override a hold.
-- **No authority in the lifecycle.** Held operations escalate to consensus, not
-  to a human. Only a genuine consensus deadlock falls through to the two named
-  parties — and both must concur. There is no admin key that can release,
-  suppress, or redirect a held payout.
+- **No authority in the lifecycle.** A held operation escalates to a forcing
+  consensus pass. If that pass can commit, it resolves the operation. Only when
+  the forcing pass itself returns `unresolved` — a genuine deadlock the
+  agreement cannot settle — does the operation reach `HELD_FINAL`, resolvable
+  only by the two named parties acting jointly. There is no admin key and no
+  external override; the deadlock path is reachable only through consensus.
 - **Locked governing text.** The agreement text is stored on-chain at
   registration and is the authority every verdict is judged against; it cannot
   be rewritten after operations start.

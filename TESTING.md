@@ -10,7 +10,7 @@ pairing, state-determination and value-movement logic is real, so each test
 exercises the true code path, not a reimplementation.
 
 
-**14 tests, no skips.**
+**17 tests, no skips.**
 
 
 ## Run
@@ -43,13 +43,26 @@ offline.
 - **first_pass_distinct_is_confirmed_new** — the same collision shape but with
   the consensus returning `distinct` resolves `CONFIRMED_NEW`. Proves the engine
   discriminates rather than always-quarantining.
-- **escalate_resolves_duplicate_of_a_duplicate** — an operation whose nearest
-  prior is *itself* a duplicate is held `POSSIBLE_DUPLICATE` on the first pass;
-  the forcing escalation pass, committing to `duplicate`, resolves it to
-  `CONFIRMED_DUPLICATE`. Proves escalation always resolves a hold instead of
-  re-verdicting and holding again.
-- **unauthorized_source_rejected** — an operation from a source not authorized
-  on the agreement reverts. Access control holds.
+- **escalate_resolves_ambiguous_to_duplicate** — an operation held
+  `POSSIBLE_DUPLICATE` after an ambiguous first pass is escalated; the forcing
+  pass commits to `duplicate` and resolves it to `CONFIRMED_DUPLICATE`. Proves
+  escalation always resolves a hold instead of re-verdicting and holding again.
+- **unauthorized_caller_rejected** — an operation whose actual transaction
+  sender is not an authorized source reverts, even when the caller passes an
+  authorized address as the `source` argument. The source is bound to the real
+  caller, so an authorized address cannot be spoofed.
+- **blank_reference_rejected** — an operation with both `obligation_ref` and
+  `incident_id` blank reverts. A duplicate cannot dodge comparison by omitting
+  its reference to slip through as `CLEAR_NEW`.
+- **pairs_against_first_prior_not_last** — when several operations target the
+  same obligation and recipient, every later one is paired against the *first*
+  (original) operation in the bucket, not a later entry. A duplicate cannot be
+  matched against a weaker or older-but-not-original entry to dodge a clean
+  finding.
+- **escalate_unresolved_reaches_held_final** — when the forcing pass genuinely
+  cannot commit, it returns `unresolved` and the operation moves to
+  `HELD_FINAL` — the reachable deadlock that unlocks the two-party joint
+  release. Proves the failed-consensus recovery path is real, not a claim.
 
 
 ### tests/test_ledger.py — settlement, replay, conservation, joint release
