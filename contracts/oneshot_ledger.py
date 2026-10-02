@@ -27,6 +27,14 @@ class OneShotLedger(gl.Contract):
     s_vote_a: TreeMap[str, str]
     s_vote_b: TreeMap[str, str]
 
+    # ---- V2: metered settlement ----
+    s_metered: TreeMap[str, bool]
+    s_ent_id: TreeMap[str, str]
+    s_payable: TreeMap[str, str]
+    s_residual: TreeMap[str, str]
+    s_residual_status: TreeMap[str, str]
+    ent_paid: TreeMap[str, u256]
+
     settled_count: u256
 
     def __init__(self, gate_address: str):
@@ -60,8 +68,17 @@ class OneShotLedger(gl.Contract):
         self.s_entitlement[oid] = str(op["entitlement"])
         self.s_linked_prior[oid] = str(op["linked_prior"])
         self.s_agreement[oid] = str(op["agreement_id"])
+        self.s_metered[oid] = op.get("metered", False) is True
+        self.s_ent_id[oid] = str(op.get("entitlement_id", ""))
+        self.s_payable[oid] = str(op.get("payable", ""))
+        self.s_residual[oid] = str(op.get("residual", ""))
 
     def _apply_state(self, oid: str, state: str, linked_prior: str) -> str:
+        # V2: metered ops settle on the gate's PAYABLE figure through the cap
+        # guard. Non-metered ops continue on the unchanged V1 path below.
+        if self.s_metered.get(oid, False):
+            return self._apply_metered(oid, state, linked_prior)
+
         if state == "CLEAR_NEW" or state == "CONFIRMED_NEW":
             recipient = self.s_recipient[oid]
             amount = int(self.s_amount[oid])
@@ -108,6 +125,89 @@ class OneShotLedger(gl.Contract):
         self.s_note[oid] = "Held. Unrecognized state from gate: " + state + "."
         return "held"
 
+    # -----------------------------------------------------------------
+    # V2 cap guard. Before ANY metered payout the ledger reads the
+    # entitlement cap from the gate and asserts that what it has already
+    # paid on that entitlement plus this payout stays within the cap. The
+    # gate reserves at verdict time; the ledger enforces at payout time.
+    # Invariant: ledger paid <= gate committed <= cap. Even a wrong gate
+    # verdict cannot make the ledger overpay an entitlement.
+    # -----------------------------------------------------------------
+    def _pay_metered(self, oid: str, payable: int) -> None:
+        aid = self.s_agreement[oid]
+        eid = self.s_ent_id.get(oid, "")
+        assert eid != "", "metered payout has no entitlement"
+        assert payable > 0, "metered payout must be greater than zero"
+        proxy = gl.get_contract_at(Address(self.gate_address))
+        ent = proxy.view().get_entitlement(aid, eid)
+        cap = int(str(ent["cap"]))
+        k = aid + "|" + eid
+        paid = int(self.ent_paid[k]) if k in self.ent_paid else 0
+        assert paid + payable <= cap, "ledger cap guard: payout would exceed the entitlement cap"
+        self._pay(self.s_recipient[oid], payable)
+        self.ent_paid[k] = u256(paid + payable)
+
+    def _apply_metered(self, oid: str, state: str, linked_prior: str) -> str:
+        eid = self.s_ent_id.get(oid, "")
+
+        if state == "CONFIRMED_NEW":
+            payable = int(self.s_payable[oid])
+            self._pay_metered(oid, payable)
+            self.s_status[oid] = "executed"
+            self.s_note[oid] = "Executed. Paid " + str(payable) + " against entitlement " + eid + ", within its cap."
+            self.settled_count = u256(int(self.settled_count) + 1)
+            return "executed"
+
+        if state == "PARTIAL":
+            payable = int(self.s_payable[oid])
+            residual = self.s_residual.get(oid, "0")
+            self._pay_metered(oid, payable)
+            self.s_status[oid] = "partial_executed"
+            self.s_residual_status[oid] = "held"
+            self.s_note[oid] = (
+                "Partially executed. Paid " + str(payable) + ", the amount still owed on entitlement " + eid
+                + ". Residual " + residual + " exceeds what the agreement grants and is held visibly, not erased."
+                + " Recoverable only by joint release of the two named agreement parties."
+            )
+            self.settled_count = u256(int(self.settled_count) + 1)
+            return "partial_executed"
+
+        if state == "CONFIRMED_DUPLICATE":
+            self.s_status[oid] = "satisfied_by_prior"
+            self.s_note[oid] = "Not executed. Entitlement " + eid + " is already fully discharged up to its cap, first by operation " + linked_prior + "."
+            self.settled_count = u256(int(self.settled_count) + 1)
+            return "satisfied_by_prior"
+
+        if state == "AMBIGUOUS" or state == "POSSIBLE_DUPLICATE":
+            self.s_status[oid] = "held"
+            self.s_note[oid] = "Held visibly. Consensus could not meter this operation against one entitlement with confidence. Funds not moved; recoverable. Anyone may escalate to a forcing consensus pass."
+            return "held"
+
+        if state == "HELD_FINAL":
+            self.s_status[oid] = "held_final"
+            self.s_note[oid] = "Final hold. Forced consensus could not meter this operation. Resolvable only by joint release of the two named agreement parties."
+            return "held_final"
+
+        self.s_status[oid] = "held"
+        self.s_note[oid] = "Held. Unrecognized metered state from gate: " + state + "."
+        return "held"
+
+    # ---- V2: two-party vote on a PARTIAL op's held residual. ----
+    def _resolve_residual(self, oid: str, vote_a: str, vote_b: str) -> str:
+        residual = int(self.s_residual.get(oid, "0"))
+        if vote_a == "execute" and vote_b == "execute":
+            if residual > 0:
+                self._pay(self.s_recipient[oid], residual)
+            self.s_residual_status[oid] = "resolved_executed"
+            self.s_note[oid] = "Both named parties jointly released the residual of " + str(residual) + " beyond the entitlement cap. Paid once."
+            return "residual_executed"
+        if vote_a == "reject" and vote_b == "reject":
+            self.s_residual_status[oid] = "resolved_rejected"
+            self.s_note[oid] = "Both named parties jointly rejected the residual of " + str(residual) + ". Permanently refused; record retained."
+            return "residual_rejected"
+        self.s_note[oid] = "Parties disagree on the residual (party_a: '" + vote_a + "', party_b: '" + vote_b + "'). Residual stays held until they concur."
+        return "parties_disagree"
+
     # ---- settle one operation: read verdict from gate, act. PERMISSIONLESS. ----
     @gl.public.write
     def settle_operation(self, op_id: str) -> str:
@@ -145,7 +245,9 @@ class OneShotLedger(gl.Contract):
     @gl.public.write
     def party_approve(self, op_id: str, decision: str) -> str:
         oid = op_id.strip()
-        assert self.s_status.get(oid, "unsettled") == "held_final", "operation is not in a final hold"
+        cur_status = self.s_status.get(oid, "unsettled")
+        residual_vote = cur_status == "partial_executed" and self.s_residual_status.get(oid, "") == "held"
+        assert cur_status == "held_final" or residual_vote, "operation is not in a final hold or a held residual"
 
         dec = decision.strip().lower()
         assert dec == "execute" or dec == "reject", "decision must be execute or reject"
@@ -171,6 +273,9 @@ class OneShotLedger(gl.Contract):
         if vote_a == "" or vote_b == "":
             self.s_note[oid] = "Awaiting both parties. party_a vote: '" + vote_a + "', party_b vote: '" + vote_b + "'."
             return "awaiting_second_party"
+
+        if residual_vote:
+            return self._resolve_residual(oid, vote_a, vote_b)
 
         if vote_a == "execute" and vote_b == "execute":
             recipient = self.s_recipient[oid]
@@ -207,6 +312,11 @@ class OneShotLedger(gl.Contract):
             "vote_a": self.s_vote_a.get(oid, ""),
             "vote_b": self.s_vote_b.get(oid, ""),
             "note": self.s_note.get(oid, ""),
+            "metered": self.s_metered.get(oid, False),
+            "entitlement_id": self.s_ent_id.get(oid, ""),
+            "payable": self.s_payable.get(oid, ""),
+            "residual": self.s_residual.get(oid, ""),
+            "residual_status": self.s_residual_status.get(oid, ""),
         }
 
     @gl.public.view
@@ -216,3 +326,9 @@ class OneShotLedger(gl.Contract):
     @gl.public.view
     def get_settled_count(self) -> u256:
         return self.settled_count
+
+    @gl.public.view
+    def get_entitlement_paid(self, agreement_id: str, entitlement_id: str) -> str:
+        k = agreement_id + "|" + entitlement_id.strip().upper()
+        return str(int(self.ent_paid[k])) if k in self.ent_paid else "0"
+

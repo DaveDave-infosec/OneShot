@@ -1,6 +1,7 @@
 ﻿import { Link } from "react-router-dom";
 import { Nav } from "../components/Nav";
 import "../styles.css";
+import { GATE_ADDRESS, LEDGER_ADDRESS } from "../lib/contracts";
 
 export function Marketing() {
   return (
@@ -123,11 +124,11 @@ export function Marketing() {
             <div className="foot-addr-head">Deployed and verifiable on GenLayer Studio · chainId 61999</div>
             <div className="foot-addr-row">
               <span className="foot-addr-k">Gate</span>
-                <span className="foot-addr-v">0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49</span>
+                <span className="foot-addr-v">{GATE_ADDRESS}</span>
             </div>
             <div className="foot-addr-row">
               <span className="foot-addr-k">Ledger</span>
-                <span className="foot-addr-v">0x633EAC3F74cD645c8ECBe2F6284fFBf62FA1DC7f</span>
+                <span className="foot-addr-v">{LEDGER_ADDRESS}</span>
             </div>
           </div>
         </div>

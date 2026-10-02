@@ -1,7 +1,7 @@
 import { readContract, writeContract } from "./genlayer";
 
-export const GATE_ADDRESS = "0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49";
-export const LEDGER_ADDRESS = "0x633EAC3F74cD645c8ECBe2F6284fFBf62FA1DC7f";
+export const GATE_ADDRESS = "0xC769DcDAbb228e3568452B2F09a7cE9bD7075cA5";
+export const LEDGER_ADDRESS = "0x14419dAd62612038A005F70636351035f5E2Dcdf";
 
 // ---- gate reads ----
 export async function getAgreement(agreementId: string) {
@@ -36,6 +36,23 @@ export async function getOperationCount() {
   });
 }
 
+// ---- V2 gate reads (metered agreements) ----
+export async function getSchedule(agreementId: string) {
+  return readContract({
+    address: GATE_ADDRESS,
+    functionName: "get_schedule",
+    args: [agreementId],
+  });
+}
+
+export async function getEntitlement(agreementId: string, entitlementId: string) {
+  return readContract({
+    address: GATE_ADDRESS,
+    functionName: "get_entitlement",
+    args: [agreementId, entitlementId],
+  });
+}
+
 // ---- gate writes ----
 export async function registerAgreement(
   title: string,
@@ -48,6 +65,21 @@ export async function registerAgreement(
     address: GATE_ADDRESS,
     functionName: "register_agreement",
     args: [title, agreementText, authorizedSources, partyA, partyB],
+  });
+}
+
+export async function registerMeteredAgreement(
+  title: string,
+  agreementText: string,
+  authorizedSources: string,
+  partyA: string,
+  partyB: string,
+  scheduleJson: string
+) {
+  return writeContract({
+    address: GATE_ADDRESS,
+    functionName: "register_metered_agreement",
+    args: [title, agreementText, authorizedSources, partyA, partyB, scheduleJson],
   });
 }
 
@@ -103,6 +135,15 @@ export async function balanceOf(account: string) {
     address: LEDGER_ADDRESS,
     functionName: "balance_of",
     args: [account],
+  });
+}
+
+// ---- ledger reads ----
+export async function getEntitlementPaid(agreementId: string, entitlementId: string) {
+  return readContract({
+    address: LEDGER_ADDRESS,
+    functionName: "get_entitlement_paid",
+    args: [agreementId, entitlementId],
   });
 }
 
