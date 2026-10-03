@@ -1,114 +1,183 @@
-﻿# OneShot — Test Suite
-
+﻿# OneShot: Test Suite
 
 Real-contract tests that drive the actual `OneShotGate` and `OneShotLedger`
 code paths on the GenLayer `gltest` direct in-process runner. Every state
-decision, every settlement, and the cross-contract read are the contracts' own
-code. Only two things are stubbed: the *other* contract's return value on a
-cross-contract call, and the LLM consensus verdict. The surrounding guard,
-pairing, state-determination and value-movement logic is real, so each test
-exercises the true code path, not a reimplementation.
+decision, every metering computation, every settlement, and the cross-contract
+reads are the contracts' own code. Only two things are stubbed: the *other*
+contract's return value on a cross-contract call, and the LLM consensus verdict.
+The surrounding guards, pairing, state determination, arithmetic, reservation
+and value movement are real, so each test exercises the true code path, not a
+reimplementation.
 
-
-**17 tests, no skips.**
-
+**62 tests, no skips.** 17 V1 tests (unchanged, the regression proof) and 45 V2
+tests.
 
 ## Run
 
-
+```
 pip install "genlayer-test[sim]" pytest
 python -m pytest tests/
-
-
-
+```
 
 The first run downloads and caches the pinned SDK (`v0.2.16`); later runs are
 offline.
 
+## V1: what each test proves
 
-## What each test proves
+### tests/test_gate.py: pairing, mapping, escalation, access (8)
 
-
-### tests/test_gate.py — pairing, mapping, escalation, access
-
-
-- **novel_op_clears_in_code_without_consensus** — a first operation on a fresh
+- **novel_op_clears_in_code_without_consensus**: a first operation on a fresh
   obligation has no colliding prior, so it resolves `CLEAR_NEW` purely in code.
   No consensus hook is set; if the gate reached for the LLM here the test would
-  fail. Proves the deterministic filter that keeps the ~95% easy case off the
+  fail. Proves the deterministic filter that keeps the easy case off the
   validators.
-- **first_pass_duplicate_against_clean_prior** — a differently-worded operation
-  that collides with a clean prior, with the entitlement-mapping consensus
-  returning `duplicate`, resolves `CONFIRMED_DUPLICATE` and links to its prior.
-- **first_pass_distinct_is_confirmed_new** — the same collision shape but with
-  the consensus returning `distinct` resolves `CONFIRMED_NEW`. Proves the engine
-  discriminates rather than always-quarantining.
-- **escalate_resolves_ambiguous_to_duplicate** — an operation held
-  `POSSIBLE_DUPLICATE` after an ambiguous first pass is escalated; the forcing
-  pass commits to `duplicate` and resolves it to `CONFIRMED_DUPLICATE`. Proves
-  escalation always resolves a hold instead of re-verdicting and holding again.
-- **unauthorized_caller_rejected** — an operation whose actual transaction
+- **first_pass_duplicate_against_clean_prior**: a differently worded operation
+  that collides with a clean prior, with the mapping consensus returning
+  `duplicate`, resolves `CONFIRMED_DUPLICATE` and links to its prior.
+- **first_pass_distinct_is_confirmed_new**: the same collision shape with the
+  consensus returning `distinct` resolves `CONFIRMED_NEW`. Proves the engine
+  discriminates rather than always quarantining.
+- **escalate_resolves_ambiguous_to_duplicate**: an operation held after an
+  ambiguous first pass is escalated; the forcing pass commits to `duplicate`
+  and resolves it. Proves escalation resolves a hold instead of holding again.
+- **unauthorized_caller_rejected**: an operation whose actual transaction
   sender is not an authorized source reverts, even when the caller passes an
-  authorized address as the `source` argument. The source is bound to the real
-  caller, so an authorized address cannot be spoofed.
-- **blank_reference_rejected** — an operation with both `obligation_ref` and
+  authorized address as the `source` argument.
+- **blank_reference_rejected**: an operation with both `obligation_ref` and
   `incident_id` blank reverts. A duplicate cannot dodge comparison by omitting
-  its reference to slip through as `CLEAR_NEW`.
-- **pairs_against_first_prior_not_last** — when several operations target the
-  same obligation and recipient, every later one is paired against the *first*
-  (original) operation in the bucket, not a later entry. A duplicate cannot be
-  matched against a weaker or older-but-not-original entry to dodge a clean
-  finding.
-- **escalate_unresolved_reaches_held_final** — when the forcing pass genuinely
+  its reference.
+- **pairs_against_first_prior_not_last**: every later operation in a bucket is
+  paired against the first (original) operation, not a later entry.
+- **escalate_unresolved_reaches_held_final**: when the forcing pass genuinely
   cannot commit, it returns `unresolved` and the operation moves to
-  `HELD_FINAL` — the reachable deadlock that unlocks the two-party joint
-  release. Proves the failed-consensus recovery path is real, not a claim.
+  `HELD_FINAL`, the reachable deadlock that unlocks the two-party release.
 
+### tests/test_ledger.py: settlement, replay, conservation, joint release (9)
 
-### tests/test_ledger.py — settlement, replay, conservation, joint release
+- **confirmed_duplicate_pays_nothing_no_double_execution**: an operation that
+  discharges an already-satisfied entitlement settles to `satisfied_by_prior`;
+  the vault is unchanged and the recipient receives nothing.
+- **clear_new_executes_with_exact_conservation**: the vault decreases and the
+  recipient increases by exactly the amount.
+- **confirmed_new_executes**: a genuinely distinct operation pays the recipient.
+- **permissionless_bystander_settle**: a wallet that is neither the owner nor a
+  party settles an operation, and the value math is exact.
+- **double_settle_reverts**: settling the same operation twice reverts.
+- **possible_duplicate_holds_funds_untouched**: a held operation settles to
+  `held`, and the vault is untouched.
+- **two_party_both_execute_pays_once**: a final hold releases only when both
+  named parties approve `execute`, then pays exactly once.
+- **two_party_disagree_stays_frozen**: differing votes move nothing.
+- **two_party_nonparty_rejected**: a non-party cannot resolve a final hold.
 
+## V2: what each test proves
 
-- **confirmed_duplicate_pays_nothing_no_double_execution** — the core
-  replay / double-spend property: an operation that discharges an
-  already-satisfied entitlement settles to `satisfied_by_prior`, the vault
-  balance is unchanged, and the recipient receives nothing. One economic intent,
-  paid once.
-- **clear_new_executes_with_exact_conservation** — a `CLEAR_NEW` operation pays:
-  the vault decreases by exactly the amount and the recipient increases by
-  exactly the amount. Value is conserved to the unit.
-- **confirmed_new_executes** — a `CONFIRMED_NEW` (genuinely distinct)
-  operation pays the recipient.
-- **permissionless_bystander_settle** — a wallet that is neither the owner nor a
-  named party settles an executable operation, and the value math is exact.
-  There is no privileged settler; the outcome is fixed by the gate verdict, not
-  the caller. This answers the centralization critique in code.
-- **double_settle_reverts** — settling the same operation twice reverts on the
-  second attempt. An operation cannot be replayed through the settlement path.
-- **possible_duplicate_holds_funds_untouched** — a held operation settles to
-  `held`, and the vault is untouched. A suspected collision is never silently
-  suppressed and never blindly paid; it waits, recoverably.
-- **two_party_both_execute_pays_once** — an operation in final hold is released
-  only when both named agreement parties independently approve `execute`; it
-  then pays exactly once.
-- **two_party_disagree_stays_frozen** — if the two parties vote differently
-  (one `execute`, one `reject`), nothing moves; the operation stays in final
-  hold until they concur.
-- **two_party_nonparty_rejected** — a caller who is not one of the two named
-  parties cannot resolve a final hold; the call reverts. No authority, no
-  backdoor.
+### tests/test_metered.py: schedule registration and verification (10)
 
+- **metered_faithful_schedule_registers_and_is_stored**: a schedule the
+  consensus finds faithful is stored, ids are normalized to upper case, every
+  entitlement starts at committed 0 with no locked recipient, and the
+  validators' schedule reasoning is kept on-chain.
+- **metered_inflated_cap_rejected_by_consensus_and_nothing_stored**: when
+  consensus finds a cap unfaithful to the text (15 against a written 10), the
+  registration reverts and no agreement is created.
+- **metered_schedule_shape_guards_reject_in_code** (6 cases): an empty
+  schedule, a non-whole cap, a zero cap, a blank label, the reserved id `NONE`,
+  and a duplicate id differing only in case all revert in code, before
+  consensus runs, and nothing is stored.
+- **metered_fenced_consensus_output_still_parses**: a verdict wrapped in prose
+  and a fenced code block still parses, proving the robust first-brace to
+  last-brace extraction.
+- **v1_agreement_reports_unmetered_with_empty_schedule**: a V1 agreement
+  reports `metered: false` and an empty schedule.
+
+### tests/test_metered_submit.py: the metered verdict and the reservation (15)
+
+- **incremental_within_cap_is_confirmed_new_and_reserves**: 7 against a cap of
+  10 resolves `CONFIRMED_NEW`, payable 7, and the entitlement reserves 7 and
+  locks its recipient.
+- **partial_pays_remaining_and_holds_excess**: the headline V2 case. After 7,
+  a differently worded 5 resolves `PARTIAL`: requested 5, payable 3, residual 2,
+  linked to the first op, with the code's metering line in the reasoning.
+- **exhausted_entitlement_is_confirmed_duplicate**: once the cap is fully
+  committed, a further op resolves `CONFIRMED_DUPLICATE` with payable 0.
+- **cumulative_mode_pays_only_the_difference**: after 5, a cumulative "total 8"
+  pays only 3, and a cumulative "total 4" pays nothing.
+- **cumulative_over_cap_is_partial**: after 5, a cumulative "total 12" requests
+  7, pays the 5 left, and holds 2.
+- **reservation_race_sum_of_payable_never_exceeds_cap**: three ops of 7,
+  verdicted back to back before any settlement, resolve NEW, PARTIAL and
+  DUPLICATE, and their payables sum to exactly the cap of 10.
+- **entitlements_meter_independently**: exhausting M2 does not touch DOC.
+- **recipient_redirect_is_held**: a later op on a locked entitlement that pays
+  a different recipient is held `AMBIGUOUS` and reserves nothing.
+- **none_mapping_is_held**: a `NONE` mapping is held and reserves nothing on
+  any entitlement.
+- **low_confidence_is_held**: a low-confidence mapping is held and reserves
+  nothing.
+- **invented_entitlement_id_is_held**: an id outside the schedule is held.
+- **bad_metered_amount_reverts** (3 cases): amounts of 0, 2.5 and -3 revert in
+  code.
+- **fenced_mapping_output_parses**: a fenced mapping verdict still parses.
+
+### tests/test_metered_escalate.py: the metered forcing pass (9)
+
+- **escalate_commits_held_op_to_confirmed_new**: a low-confidence hold
+  reserves nothing until escalation commits it, and only then reserves.
+- **late_escalate_meters_against_current_remaining**: an op held at submit,
+  resolved after another op took 7 of the 10, is metered against the 3 that are
+  actually left: `PARTIAL`, payable 3. Late resolution cannot claim stale
+  headroom.
+- **escalate_after_exhaustion_is_confirmed_duplicate**: a held op resolved after
+  the cap is exhausted pays nothing.
+- **escalate_unresolved_reaches_held_final**: `UNRESOLVED` is the honest
+  deadlock and moves the op to `HELD_FINAL`, reserving nothing.
+- **forced_mapping_cannot_redirect_locked_recipient**: even a forced mapping
+  cannot pay a recipient other than the one locked on the entitlement; the op
+  moves to `HELD_FINAL`.
+- **forced_invented_id_reaches_held_final**: a forced id outside the schedule
+  moves the op to `HELD_FINAL`.
+- **forced_cumulative_pays_only_the_difference**: a forced cumulative reading
+  pays only the difference.
+- **metered_op_cannot_be_escalated_twice**: a second escalation reverts.
+- **unheld_metered_op_cannot_be_escalated**: an op that was never held cannot
+  be escalated.
+
+### tests/test_metered_ledger.py: metered settlement and the cap guard (11)
+
+- **metered_settles_on_payable_not_raw_amount**: a cumulative "total 8" with
+  payable 3 moves exactly 3, never 8.
+- **partial_pays_payable_and_holds_residual**: a PARTIAL moves exactly the
+  payable part, holds the residual, and conserves value to the unit.
+- **cap_guard_refuses_payout_beyond_cap**: with 7 of 10 already paid, a
+  deliberately wrong gate verdict asking to pay 5 more is refused by the ledger,
+  and not one unit moves.
+- **metered_duplicate_pays_nothing**: a metered duplicate moves nothing.
+- **metered_ambiguous_holds_funds_untouched**: a metered hold moves nothing.
+- **sync_after_escalate_settles_partial**: after an escalation resolves a held
+  op to PARTIAL, `sync_from_gate` settles it exactly.
+- **residual_both_execute_pays_once**: both parties releasing the residual pays
+  it exactly once; a further vote reverts.
+- **residual_both_reject_is_permanent**: both parties refusing the residual
+  refuses it permanently.
+- **residual_disagree_stays_held**: differing votes leave the residual held.
+- **nonparty_cannot_vote_on_residual**: a non-party vote reverts.
+- **bystander_settles_partial_exactly**: settlement of a PARTIAL stays
+  permissionless and exact.
 
 ## Harness notes
 
-
 - Runner: `gltest` direct in-process runner (`from gltest.direct import ...`).
-- Cross-contract calls (the ledger reading the gate's `get_operation` /
-  `get_agreement`) are answered by a `_gl_call_hook` in `tests/conftest.py`, so
-  the ledger's real settlement logic runs against a controlled gate verdict.
-- The gate's consensus step (`gl.eq_principle.prompt_non_comparative`) is
-  answered by the same hook with a stubbed entitlement-mapping verdict; the
-  gate's real pairing and state-determination logic runs on top of it.
-- `vm.activate()` wraps any call that reads the internal balance ledger or
-  crosses contracts. Contract `assert` failures surface as `AssertionError`
-  under the direct runner and are asserted with `pytest.raises(AssertionError)`.
+- Cross-contract calls (the ledger reading the gate's `get_operation`,
+  `get_agreement` and `get_entitlement`) are answered by a `_gl_call_hook`, so
+  the ledger's real settlement and cap-guard logic runs against a controlled
+  gate verdict.
+- The gate's consensus steps (`gl.eq_principle.prompt_non_comparative`) are
+  answered by the same hook mechanism with a stubbed verdict (schedule
+  verification, metered mapping, or the forcing pass); the gate's real
+  validation, state determination and arithmetic run on top of it.
+- Every contract call that reaches consensus, the balance ledger, or another
+  contract runs inside `with vm.activate():`, which installs the GenVM mock that
+  routes those calls to the hook. Contract `assert` failures surface as
+  `AssertionError` and are asserted with `pytest.raises(AssertionError)`.
 - The SDK is pinned to `v0.2.16` in `tests/conftest.py`.
