@@ -36,6 +36,12 @@ const META: Record<string, StateMeta> = {
     label: "Confirmed new",
     blurb: "Discharges a genuinely distinct entitlement. Released for settlement.",
   },
+  PARTIAL: {
+    color: "#7FA8D9",
+    dim: "#141E2A",
+    label: "Partial",
+    blurb: "Pays only what the entitlement still owes. The excess is held visibly, recoverable by both parties.",
+  },
   REPLACEMENT: {
     color: "#A99AC7",
     dim: "#201C2A",
@@ -70,7 +76,18 @@ export function settlementLabel(status: string): string {
     superseded: "Superseded by a replacement",
     resolved_executed: "Resolved · paid by joint release",
     resolved_rejected: "Resolved · rejected by joint release",
+    partial_executed: "Partially paid · residual held",
     unsettled: "Not yet settled",
+    unknown: "Reading settlement · refresh if this persists",
   };
   return m[status] || status || "Not yet settled";
+}
+
+export function settlementText(status: string, residualStatus: string): string {
+  if (status === "partial_executed") {
+    if (residualStatus === "resolved_executed") return "Partially paid · residual released by both parties";
+    if (residualStatus === "resolved_rejected") return "Partially paid · residual refused by both parties";
+    return "Partially paid · residual held";
+  }
+  return settlementLabel(status);
 }
