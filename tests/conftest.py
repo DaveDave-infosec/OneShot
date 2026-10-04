@@ -51,7 +51,7 @@ def deploy_gate(vm):
     return deploy_contract(GATE, vm, sdk_version=SDK)
 
 def deploy_ledger(vm, gate_hex):
-    return deploy_contract(LEDGER, vm, gate_hex, sdk_version=SDK)
+    return deploy_contract(LEDGER, vm, gate_hex, 1000, sdk_version=SDK)
 
 # ---- gate consensus stub: the gate calls gl.eq_principle.prompt_non_comparative
 # internally. We answer the ExecPromptTemplate request with a JSON string so the
@@ -99,11 +99,12 @@ def ag_dict(aid="1", title="Smoke Test Agreement", text="Provider completes M2."
     pb = party_b if party_b is not None else RECIP2
     return {"id": aid, "title": title, "agreement_text": text,
             "authorized_sources": authorized_sources,
-            "party_a": pa.lower(), "party_b": pb.lower()}
+            "party_a": pa.lower(), "party_b": pb.lower(),
+            "active": True, "accepted_a": True, "accepted_b": True, "text_hash": ""}
 
 def ledger_gate_hook(op=None, ag=None):
-    from genlayer.py import calldata
     def hook(vm, request):
+        from genlayer.py import calldata
         if isinstance(request, dict) and "CallContract" in request:
             m = request["CallContract"]["calldata"]["method"]
             if m == "get_operation" and op is not None:
@@ -112,3 +113,34 @@ def ledger_gate_hook(op=None, ag=None):
                 return bytes([0]) + calldata.encode(ag)
         return None
     return hook
+
+
+# ---- both named parties accept the locked text, then the sender returns ----
+def activate(vm, contract, aid, party_a, party_b, back_to=OWNER):
+    h = contract.get_agreement(aid)["text_hash"]
+    set_sender(vm, party_a)
+    contract.accept_agreement(aid, h)
+    set_sender(vm, party_b)
+    contract.accept_agreement(aid, h)
+    set_sender(vm, back_to)
+
+
+# ---- ledger helpers ----
+# This runner cannot make cross-contract calls in a second vm.activate() block
+# once one has closed, so funding happens INSIDE each test's single block.
+def funded_ledger(vm, amount=100, aid="1"):
+    c = deploy_ledger(vm, hx(GATE_ADDR))
+    set_sender(vm, OWNER)
+    return c
+
+
+def fund(vm, c, amount=100, aid="1"):
+    # Call as the first line INSIDE the test's vm.activate() block. The issuer
+    # mints, then funds an active agreement's escrow; the test's own gate hook
+    # and the issuer as sender are restored afterwards.
+    prev = vm._gl_call_hook
+    set_sender(vm, OWNER)
+    c.mint(amount)
+    vm._gl_call_hook = ledger_gate_hook(ag=ag_dict(aid=aid, party_a=hx(PARTY_A), party_b=hx(PARTY_B)))
+    c.fund_escrow(aid, amount)
+    vm._gl_call_hook = prev

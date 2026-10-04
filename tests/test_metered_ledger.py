@@ -1,6 +1,6 @@
 import pytest
 from conftest import (deploy_ledger, set_sender, hx, op_dict, ag_dict,
-                      GATE_ADDR, OWNER, PARTY_A, PARTY_B, BYSTANDER, RECIP)
+                      GATE_ADDR, OWNER, PARTY_A, PARTY_B, BYSTANDER, RECIP, funded_ledger, fund)
 
 VAULT = "__vault__"
 
@@ -26,8 +26,8 @@ def mop(oid="1", amount="5", state="CONFIRMED_NEW", payable="5", residual="0",
 
 
 def gate_hook(op=None, ag=None, ent=None):
-    from genlayer.py import calldata
     def hook(vm, request):
+        from genlayer.py import calldata
         if isinstance(request, dict) and "CallContract" in request:
             m = request["CallContract"]["calldata"]["method"]
             if m == "get_operation" and op is not None:
@@ -45,21 +45,20 @@ def bal(c, who):
 
 
 def fresh(vm):
-    c = deploy_ledger(vm, hx(GATE_ADDR))
-    set_sender(vm, OWNER)
-    return c
+    # the issuer mints 100 and funds agreement 1's escrow
+    return funded_ledger(vm, 100)
 
 
 # 1. cumulative "total 8" settles on PAYABLE 3, never on the raw amount 8
 def test_metered_settles_on_payable_not_raw_amount(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         vm._gl_call_hook = gate_hook(op=mop(amount="8", payable="3", mode="cumulative"), ent=ENT_M2)
         r = c.settle_operation("1")
     assert r == "executed"
     assert bal(c, RECIP) == 3
-    assert bal(c, VAULT) == 97
+    assert int(c.get_escrow("1")) == 97
     assert c.get_entitlement_paid("1", "M2") == "3"
 
 
@@ -67,13 +66,13 @@ def test_metered_settles_on_payable_not_raw_amount(vm):
 def test_partial_pays_payable_and_holds_residual(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         vm._gl_call_hook = gate_hook(op=mop(state="PARTIAL", amount="5", payable="3", residual="2"), ent=ENT_M2)
         r = c.settle_operation("1")
     assert r == "partial_executed"
     assert bal(c, RECIP) == 3
-    assert bal(c, VAULT) == 97
-    assert bal(c, RECIP) + bal(c, VAULT) == 100
+    assert int(c.get_escrow("1")) == 97
+    assert bal(c, RECIP) + int(c.get_escrow("1")) == 100
     s = c.get_settlement("1")
     assert s["status"] == "partial_executed"
     assert s["residual"] == "2"
@@ -85,14 +84,14 @@ def test_partial_pays_payable_and_holds_residual(vm):
 def test_cap_guard_refuses_payout_beyond_cap(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         vm._gl_call_hook = gate_hook(op=mop(oid="1", payable="7"), ent=ENT_M2)
         c.settle_operation("1")
         vm._gl_call_hook = gate_hook(op=mop(oid="2", payable="5"), ent=ENT_M2)
         with pytest.raises(AssertionError):
             c.settle_operation("2")
     assert bal(c, RECIP) == 7
-    assert bal(c, VAULT) == 93
+    assert int(c.get_escrow("1")) == 93
     assert c.get_entitlement_paid("1", "M2") == "7"
 
 
@@ -100,30 +99,30 @@ def test_cap_guard_refuses_payout_beyond_cap(vm):
 def test_metered_duplicate_pays_nothing(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         vm._gl_call_hook = gate_hook(op=mop(state="CONFIRMED_DUPLICATE", payable="0", linked_prior="1"), ent=ENT_M2)
         r = c.settle_operation("2")
     assert r == "satisfied_by_prior"
     assert bal(c, RECIP) == 0
-    assert bal(c, VAULT) == 100
+    assert int(c.get_escrow("1")) == 100
 
 
 # 5. metered hold moves nothing
 def test_metered_ambiguous_holds_funds_untouched(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         vm._gl_call_hook = gate_hook(op=mop(state="AMBIGUOUS", payable="0"), ent=ENT_M2)
         r = c.settle_operation("1")
     assert r == "held"
-    assert bal(c, VAULT) == 100
+    assert int(c.get_escrow("1")) == 100
 
 
 # 6. after an escalate, sync_from_gate settles the resolved PARTIAL
 def test_sync_after_escalate_settles_partial(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         vm._gl_call_hook = gate_hook(op=mop(state="AMBIGUOUS", payable="0"), ent=ENT_M2)
         c.settle_operation("1")
         vm._gl_call_hook = gate_hook(op=mop(state="PARTIAL", amount="6", payable="3", residual="3"), ent=ENT_M2)
@@ -134,7 +133,6 @@ def test_sync_after_escalate_settles_partial(vm):
 
 
 def settle_partial(vm, c):
-    c.mint(VAULT, 100)
     vm._gl_call_hook = gate_hook(op=mop(state="PARTIAL", amount="5", payable="3", residual="2"), ag=AG, ent=ENT_M2)
     c.settle_operation("1")
 
@@ -143,6 +141,7 @@ def settle_partial(vm, c):
 def test_residual_both_execute_pays_once(vm):
     c = fresh(vm)
     with vm.activate():
+        fund(vm, c)
         settle_partial(vm, c)
         set_sender(vm, PARTY_A)
         r1 = c.party_approve("1", "execute")
@@ -153,7 +152,7 @@ def test_residual_both_execute_pays_once(vm):
     assert r1 == "awaiting_second_party"
     assert r2 == "residual_executed"
     assert bal(c, RECIP) == 5
-    assert bal(c, VAULT) == 95
+    assert int(c.get_escrow("1")) == 95
     assert c.get_settlement("1")["residual_status"] == "resolved_executed"
 
 
@@ -161,6 +160,7 @@ def test_residual_both_execute_pays_once(vm):
 def test_residual_both_reject_is_permanent(vm):
     c = fresh(vm)
     with vm.activate():
+        fund(vm, c)
         settle_partial(vm, c)
         set_sender(vm, PARTY_A)
         c.party_approve("1", "reject")
@@ -175,6 +175,7 @@ def test_residual_both_reject_is_permanent(vm):
 def test_residual_disagree_stays_held(vm):
     c = fresh(vm)
     with vm.activate():
+        fund(vm, c)
         settle_partial(vm, c)
         set_sender(vm, PARTY_A)
         c.party_approve("1", "execute")
@@ -189,6 +190,7 @@ def test_residual_disagree_stays_held(vm):
 def test_nonparty_cannot_vote_on_residual(vm):
     c = fresh(vm)
     with vm.activate():
+        fund(vm, c)
         settle_partial(vm, c)
         set_sender(vm, BYSTANDER)
         with pytest.raises(AssertionError):
@@ -199,10 +201,10 @@ def test_nonparty_cannot_vote_on_residual(vm):
 def test_bystander_settles_partial_exactly(vm):
     c = fresh(vm)
     with vm.activate():
-        c.mint(VAULT, 100)
+        fund(vm, c)
         set_sender(vm, BYSTANDER)
         vm._gl_call_hook = gate_hook(op=mop(state="PARTIAL", amount="5", payable="3", residual="2"), ent=ENT_M2)
         r = c.settle_operation("1")
     assert r == "partial_executed"
     assert bal(c, RECIP) == 3
-    assert bal(c, VAULT) == 97
+    assert int(c.get_escrow("1")) == 97

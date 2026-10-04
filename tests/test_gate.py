@@ -1,15 +1,16 @@
 ﻿import pytest
 from conftest import (deploy_gate, set_sender, gate_llm_hook, hx,
-                      OWNER, BYSTANDER, RECIP)
+                      OWNER, BYSTANDER, RECIP, PARTY_B, activate)
 
 TEXT = "Provider completes milestone M2 for a fixed fee. On acceptance, the completion payment for M2 becomes due to the provider."
 
 # The gate now binds the operation source to the ACTUAL caller (gl.message
 # .sender_address). The default vm sender is OWNER, so OWNER is registered as the
 # authorized source. A caller can only ever submit as itself.
-def _reg(c):
-    return c.register_agreement("Smoke", TEXT, hx(OWNER), hx(OWNER),
-                                "0x000000000000000000000000000000000000bbbb")
+def _reg(c, vm):
+    aid = c.register_agreement("Smoke", TEXT, hx(OWNER), hx(OWNER), hx(PARTY_B))
+    activate(vm, c, aid, OWNER, PARTY_B)
+    return aid
 
 def _submit(c, obligation="M2", family="completion_payment", purpose="pay", hint="hint", incident=""):
     # the passed source arg is ignored by the gate for auth; caller identity wins.
@@ -19,7 +20,7 @@ def test_novel_op_clears_in_code_without_consensus(vm):
     # a first op on a fresh obligation has no prior -> CLEAR_NEW purely in code.
     # No consensus hook is set; if the gate tried to call the LLM this would fail.
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         state = _submit(c)
     assert state == "CLEAR_NEW"
@@ -28,7 +29,7 @@ def test_novel_op_clears_in_code_without_consensus(vm):
 
 def test_first_pass_duplicate_against_clean_prior(vm):
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         _submit(c)  # op1 CLEAR_NEW
         vm._gl_call_hook = gate_llm_hook("duplicate")
@@ -38,7 +39,7 @@ def test_first_pass_duplicate_against_clean_prior(vm):
 
 def test_first_pass_distinct_is_confirmed_new(vm):
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         _submit(c)  # op1 CLEAR_NEW
         vm._gl_call_hook = gate_llm_hook("distinct")
@@ -51,7 +52,7 @@ def test_escalate_resolves_ambiguous_to_duplicate(vm):
     # Escalation is now needed only for AMBIGUOUS ops. Prove escalation still
     # resolves: an ambiguous first-pass verdict becomes CONFIRMED_DUPLICATE.
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         _submit(c)  # op1 CLEAR_NEW
         vm._gl_call_hook = gate_llm_hook("ambiguous")
@@ -68,7 +69,7 @@ def test_unauthorized_caller_rejected(vm):
     # BYSTANDER is not an authorized source; even passing OWNER's address as the
     # source argument must not help, because the gate checks the real caller.
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         set_sender(vm, BYSTANDER)
         with pytest.raises(AssertionError):
@@ -81,7 +82,7 @@ def test_blank_reference_rejected(vm):
     # comparison entirely. The gate now rejects it so a duplicate cannot slip
     # through as CLEAR_NEW by omitting its reference.
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         with pytest.raises(AssertionError):
             c.submit_operation("1", hx(OWNER), RECIP, "GEN", "5",
@@ -93,7 +94,7 @@ def test_pairs_against_first_prior_not_last(vm):
     # paired against op1 (the original), not op2 (a later entry), so a duplicate
     # cannot be matched against a weaker/older-but-not-original entry.
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         _submit(c)  # op1 CLEAR_NEW (the original)
         vm._gl_call_hook = gate_llm_hook("duplicate")
@@ -108,7 +109,7 @@ def test_escalate_unresolved_reaches_held_final(vm):
     # the operation moves to HELD_FINAL — the reachable path that unlocks the
     # two-party joint release. Proves the recovery path is real, not a claim.
     c = deploy_gate(vm)
-    _reg(c)
+    _reg(c, vm)
     with vm.activate():
         _submit(c)  # op1 CLEAR_NEW
         vm._gl_call_hook = gate_llm_hook("ambiguous")

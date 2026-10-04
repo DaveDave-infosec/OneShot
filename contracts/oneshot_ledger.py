@@ -2,12 +2,14 @@
 
 from genlayer import *
 
-# fixed internal-ledger key for funds held by the ledger itself.
-VAULT_KEY = "__vault__"
-
-
 class OneShotLedger(gl.Contract):
     gate_address: str
+
+    # ---- scarce, authorized asset model ----
+    issuer: str
+    max_supply: u256
+    total_issued: u256
+    escrow: TreeMap[str, u256]
 
     # internal token ledger (the ledger IS the token � Holdline pattern)
     balances: TreeMap[str, u256]
@@ -37,26 +39,75 @@ class OneShotLedger(gl.Contract):
 
     settled_count: u256
 
-    def __init__(self, gate_address: str):
+    def __init__(self, gate_address: str, max_supply: u256):
         self.gate_address = gate_address.strip().lower()
         self.settled_count = u256(0)
+        # The deployer is the only issuer. Total issuance can never exceed max_supply.
+        assert int(max_supply) > 0, "max_supply must be greater than zero"
+        self.issuer = gl.message.sender_address.as_hex.lower()
+        self.max_supply = max_supply
+        self.total_issued = u256(0)
 
     # ---- internal token ledger (Holdline pattern) ----
     @gl.public.write
-    def mint(self, to_address: str, amount: u256) -> None:
+    def mint(self, amount: u256) -> None:
+        # Restricted issuance: only the issuer, only into the issuer's own
+        # treasury balance, never beyond max_supply. There is no recipient
+        # argument, so nothing can be minted into an escrow or a recipient.
+        caller = gl.message.sender_address.as_hex.lower()
+        assert caller == self.issuer, "only the issuer can mint"
+        amt = int(amount)
+        assert amt > 0, "mint amount must be greater than zero"
+        issued = int(self.total_issued)
+        assert issued + amt <= int(self.max_supply), "mint would exceed max_supply"
+        self.total_issued = u256(issued + amt)
+        cur = int(self.balances[caller]) if caller in self.balances else 0
+        self.balances[caller] = u256(cur + amt)
+
+    @gl.public.write
+    def transfer(self, to_address: str, amount: u256) -> None:
+        # A holder can only ever move their own balance.
+        caller = gl.message.sender_address.as_hex.lower()
         to_addr = to_address.strip().lower()
-        cur = int(self.balances[to_addr]) if to_addr in self.balances else 0
-        self.balances[to_addr] = u256(cur + int(amount))
+        assert to_addr.startswith("0x") and len(to_addr) == 42, "recipient must be an address"
+        amt = int(amount)
+        assert amt > 0, "transfer amount must be greater than zero"
+        cbal = int(self.balances[caller]) if caller in self.balances else 0
+        assert cbal >= amt, "insufficient balance"
+        self.balances[caller] = u256(cbal - amt)
+        tbal = int(self.balances[to_addr]) if to_addr in self.balances else 0
+        self.balances[to_addr] = u256(tbal + amt)
+
+    @gl.public.write
+    def fund_escrow(self, agreement_id: str, amount: u256) -> None:
+        # Back an ACTIVE agreement with real balance. The caller moves their own
+        # balance into that agreement's escrow; settlement for the agreement
+        # draws only from here.
+        aid = agreement_id.strip()
+        caller = gl.message.sender_address.as_hex.lower()
+        amt = int(amount)
+        assert amt > 0, "escrow amount must be greater than zero"
+        proxy = gl.get_contract_at(Address(self.gate_address))
+        ag = proxy.view().get_agreement(aid)
+        assert ag.get("active", False) is True, "agreement is pending: both named parties must accept it before it can be funded"
+        cbal = int(self.balances[caller]) if caller in self.balances else 0
+        assert cbal >= amt, "insufficient balance"
+        self.balances[caller] = u256(cbal - amt)
+        ebal = int(self.escrow[aid]) if aid in self.escrow else 0
+        self.escrow[aid] = u256(ebal + amt)
 
     @gl.public.view
     def balance_of(self, account: str) -> u256:
         acct = account.strip().lower()
         return self.balances[acct] if acct in self.balances else u256(0)
 
-    def _pay(self, recipient: str, amount: int) -> None:
-        vbal = int(self.balances[VAULT_KEY]) if VAULT_KEY in self.balances else 0
-        assert vbal >= amount, "ledger vault balance below payout amount"
-        self.balances[VAULT_KEY] = u256(vbal - amount)
+    def _pay(self, oid: str, recipient: str, amount: int) -> None:
+        # Settlement draws ONLY from the escrow of the operation's own agreement.
+        # An agreement can never pay out more than was escrowed for it.
+        aid = self.s_agreement[oid]
+        ebal = int(self.escrow[aid]) if aid in self.escrow else 0
+        assert ebal >= amount, "agreement escrow below payout amount"
+        self.escrow[aid] = u256(ebal - amount)
         rbal = int(self.balances[recipient]) if recipient in self.balances else 0
         self.balances[recipient] = u256(rbal + amount)
 
@@ -82,7 +133,7 @@ class OneShotLedger(gl.Contract):
         if state == "CLEAR_NEW" or state == "CONFIRMED_NEW":
             recipient = self.s_recipient[oid]
             amount = int(self.s_amount[oid])
-            self._pay(recipient, amount)
+            self._pay(oid, recipient, amount)
             self.s_status[oid] = "executed"
             self.s_note[oid] = "Executed. Discharges a distinct entitlement; payout released."
             self.settled_count = u256(int(self.settled_count) + 1)
@@ -115,7 +166,7 @@ class OneShotLedger(gl.Contract):
                 self.s_note[linked_prior] = "Superseded by replacement operation " + oid + "."
             recipient = self.s_recipient[oid]
             amount = int(self.s_amount[oid])
-            self._pay(recipient, amount)
+            self._pay(oid, recipient, amount)
             self.s_status[oid] = "executed"
             self.s_note[oid] = "Executed as replacement. Superseded pending prior operation " + linked_prior + "."
             self.settled_count = u256(int(self.settled_count) + 1)
@@ -144,7 +195,7 @@ class OneShotLedger(gl.Contract):
         k = aid + "|" + eid
         paid = int(self.ent_paid[k]) if k in self.ent_paid else 0
         assert paid + payable <= cap, "ledger cap guard: payout would exceed the entitlement cap"
-        self._pay(self.s_recipient[oid], payable)
+        self._pay(oid, self.s_recipient[oid], payable)
         self.ent_paid[k] = u256(paid + payable)
 
     def _apply_metered(self, oid: str, state: str, linked_prior: str) -> str:
@@ -197,7 +248,7 @@ class OneShotLedger(gl.Contract):
         residual = int(self.s_residual.get(oid, "0"))
         if vote_a == "execute" and vote_b == "execute":
             if residual > 0:
-                self._pay(self.s_recipient[oid], residual)
+                self._pay(oid, self.s_recipient[oid], residual)
             self.s_residual_status[oid] = "resolved_executed"
             self.s_note[oid] = "Both named parties jointly released the residual of " + str(residual) + " beyond the entitlement cap. Paid once."
             return "residual_executed"
@@ -280,7 +331,7 @@ class OneShotLedger(gl.Contract):
         if vote_a == "execute" and vote_b == "execute":
             recipient = self.s_recipient[oid]
             amount = int(self.s_amount[oid])
-            self._pay(recipient, amount)
+            self._pay(oid, recipient, amount)
             self.s_status[oid] = "resolved_executed"
             self.s_note[oid] = "Both named parties jointly approved execution. Payout released."
             self.settled_count = u256(int(self.settled_count) + 1)
@@ -331,4 +382,17 @@ class OneShotLedger(gl.Contract):
     def get_entitlement_paid(self, agreement_id: str, entitlement_id: str) -> str:
         k = agreement_id + "|" + entitlement_id.strip().upper()
         return str(int(self.ent_paid[k])) if k in self.ent_paid else "0"
+
+    @gl.public.view
+    def get_escrow(self, agreement_id: str) -> u256:
+        aid = agreement_id.strip()
+        return self.escrow[aid] if aid in self.escrow else u256(0)
+
+    @gl.public.view
+    def get_supply(self) -> dict:
+        return {
+            "issuer": self.issuer,
+            "max_supply": str(int(self.max_supply)),
+            "total_issued": str(int(self.total_issued)),
+        }
 

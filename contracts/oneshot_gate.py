@@ -2,6 +2,7 @@
 
 from genlayer import *
 import json
+import hashlib
 
 
 class OneShotGate(gl.Contract):
@@ -48,6 +49,13 @@ class OneShotGate(gl.Contract):
     ent_committed: TreeMap[str, u256]
     ent_recipient: TreeMap[str, str]
     ent_first_op: TreeMap[str, str]
+
+    # ---- two-party acceptance of the locked agreement text ----
+    ag_text_hash: TreeMap[str, str]
+    ag_accepted_a: TreeMap[str, bool]
+    ag_accepted_b: TreeMap[str, bool]
+    ag_active: TreeMap[str, bool]
+
     op_ent: TreeMap[str, str]
     op_mode: TreeMap[str, str]
     op_requested: TreeMap[str, str]
@@ -68,6 +76,12 @@ class OneShotGate(gl.Contract):
         party_a: str,
         party_b: str,
     ) -> str:
+        # Validate everything before writing anything.
+        pa_chk = party_a.strip().lower()
+        pb_chk = party_b.strip().lower()
+        assert pa_chk != "" and pb_chk != "", "both named parties are required"
+        assert pa_chk != pb_chk, "the two named parties must be different addresses"
+
         idx = u256(int(self.agreement_count) + 1)
         self.agreement_count = idx
         aid = str(idx)
@@ -85,6 +99,10 @@ class OneShotGate(gl.Contract):
         self.ag_party_a[aid] = party_a.strip().lower()
         self.ag_party_b[aid] = party_b.strip().lower()
         self.ag_exists[aid] = True
+        self.ag_text_hash[aid] = hashlib.sha256(agreement_text.encode("utf-8")).hexdigest()
+        self.ag_accepted_a[aid] = False
+        self.ag_accepted_b[aid] = False
+        self.ag_active[aid] = False
         return aid
 
     @gl.public.write
@@ -103,6 +121,9 @@ class OneShotGate(gl.Contract):
     ) -> str:
         aid = agreement_id
         assert self.ag_exists.get(aid, False), "agreement does not exist"
+
+        # Both named parties must have accepted the locked text first.
+        assert self.ag_active.get(aid, False), "agreement is pending: both named parties must accept it before it can govern payouts"
 
         # Ask 1 — bind the source to the ACTUAL transaction sender. A caller can
         # only ever submit as itself; the passed `source` arg is ignored for auth
@@ -460,6 +481,12 @@ Return ONLY one JSON object with these keys:
         party_b: str,
         schedule_json: str,
     ) -> str:
+        # Validate everything before writing anything, and before any consensus call.
+        pa_chk = party_a.strip().lower()
+        pb_chk = party_b.strip().lower()
+        assert pa_chk != "" and pb_chk != "", "both named parties are required"
+        assert pa_chk != pb_chk, "the two named parties must be different addresses"
+
         entries = json.loads(schedule_json)
         assert isinstance(entries, list), "schedule must be a JSON list"
         assert len(entries) >= 1, "schedule must have at least one entitlement"
@@ -550,6 +577,10 @@ Return ONLY one JSON object with these keys:
         self.ag_party_a[aid] = party_a.strip().lower()
         self.ag_party_b[aid] = party_b.strip().lower()
         self.ag_exists[aid] = True
+        self.ag_text_hash[aid] = hashlib.sha256(agreement_text.encode("utf-8")).hexdigest()
+        self.ag_accepted_a[aid] = False
+        self.ag_accepted_b[aid] = False
+        self.ag_active[aid] = False
 
         self.ag_metered[aid] = True
         self.ag_ent_ids[aid] = ",".join(ids)
@@ -885,6 +916,32 @@ Return ONLY one JSON object with these keys:
 
         return self._apply_meter(oid, aid, eid, mode, amt, rcpt, reasoning)
 
+    # -----------------------------------------------------------------
+    # Two-party acceptance. An agreement governs payouts only after BOTH
+    # named parties accept it. Each party must pass the SHA-256 hash of the
+    # stored agreement text, proving they accepted that exact locked text.
+    # One party alone can never activate an agreement.
+    # -----------------------------------------------------------------
+    @gl.public.write
+    def accept_agreement(self, agreement_id: str, text_hash: str) -> str:
+        aid = agreement_id.strip()
+        assert self.ag_exists.get(aid, False), "agreement does not exist"
+        caller = gl.message.sender_address.as_hex.lower()
+        pa = self.ag_party_a.get(aid, "")
+        pb = self.ag_party_b.get(aid, "")
+        assert caller == pa or caller == pb, "caller is not a named party to this agreement"
+        assert text_hash.strip().lower() == self.ag_text_hash.get(aid, ""), "text hash does not match the locked agreement text"
+        if caller == pa:
+            assert not self.ag_accepted_a.get(aid, False), "party A has already accepted"
+            self.ag_accepted_a[aid] = True
+        if caller == pb:
+            assert not self.ag_accepted_b.get(aid, False), "party B has already accepted"
+            self.ag_accepted_b[aid] = True
+        if self.ag_accepted_a.get(aid, False) and self.ag_accepted_b.get(aid, False):
+            self.ag_active[aid] = True
+            return "active"
+        return "pending"
+
     def _ent_dict(self, aid: str, eid: str) -> dict:
         k = aid + "|" + eid
         assert k in self.ent_cap, "entitlement does not exist"
@@ -933,6 +990,10 @@ Return ONLY one JSON object with these keys:
             "party_a": self.ag_party_a.get(aid, ""),
             "party_b": self.ag_party_b.get(aid, ""),
             "metered": self.ag_metered.get(aid, False),
+            "text_hash": self.ag_text_hash.get(aid, ""),
+            "accepted_a": self.ag_accepted_a.get(aid, False),
+            "accepted_b": self.ag_accepted_b.get(aid, False),
+            "active": self.ag_active.get(aid, False),
         }
 
     @gl.public.view

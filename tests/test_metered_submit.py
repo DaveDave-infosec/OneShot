@@ -1,6 +1,6 @@
 import json
 import pytest
-from conftest import deploy_gate, set_sender, hx, OWNER, PARTY_A, PARTY_B, RECIP, RECIP2
+from conftest import deploy_gate, set_sender, hx, OWNER, PARTY_A, PARTY_B, RECIP, RECIP2, activate
 
 AG_TEXT = (
     "Provider completes milestone M2. Client pays a milestone M2 fee of 10 GEN. "
@@ -40,9 +40,11 @@ def map_hook(eid, mode="incremental", confidence="high", reasoning="grounded in 
 
 def reg(vm, gate):
     vm._gl_call_hook = verify_hook()
-    return gate.register_metered_agreement(
+    aid = gate.register_metered_agreement(
         "Metered", AG_TEXT, hx(OWNER), hx(PARTY_A), hx(PARTY_B), SCHEDULE
     )
+    activate(vm, gate, aid, PARTY_A, PARTY_B)
+    return aid
 
 
 def sub(vm, gate, aid, amount, eid="M2", mode="incremental", confidence="high",
