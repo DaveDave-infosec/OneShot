@@ -408,3 +408,19 @@ button { font-family: var(--body); cursor: pointer; }
   .hero-band::before, .scroll-cue .chev { animation: none; }
   .how-step:hover, .trust-card:hover { transform: none; }
 }
+
+/* ---- steward round: two-party acceptance and escrow backing ---- */
+.accept-panel { margin: 18px 0 4px; padding: 14px 16px; border: 1px solid var(--rule); border-radius: 10px; background: rgba(255,255,255,0.02); }
+.accept-panel.is-active { border-color: rgba(111,191,142,0.35); }
+.accept-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+.accept-badge { font-family: var(--mono); font-size: 10.5px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; padding: 4px 9px; border-radius: 4px; border: 1.5px solid currentColor; }
+.accept-badge.on { color: #6FBF8E; background: rgba(111,191,142,0.08); }
+.accept-badge.off { color: #E08A54; background: rgba(224,138,84,0.08); }
+.accept-sub { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+.accept-row { display: flex; gap: 26px; flex-wrap: wrap; margin-bottom: 10px; }
+.meta-v.yes { color: #6FBF8E; }
+.meta-v.no { color: #E08A54; }
+.fund-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 8px; }
+.fund-row input { width: 110px; font-family: var(--mono); font-size: 12.5px; color: var(--ink); background: var(--card-2); border: 1px solid var(--rule); border-radius: 5px; padding: 7px 10px; outline: none; }
+.fund-row input:focus { border-color: #E08A54; }
+.fund-note { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }

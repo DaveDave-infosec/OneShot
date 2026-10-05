@@ -1,7 +1,7 @@
 import { readContract, writeContract } from "./genlayer";
 
-export const GATE_ADDRESS = "0xC769DcDAbb228e3568452B2F09a7cE9bD7075cA5";
-export const LEDGER_ADDRESS = "0x14419dAd62612038A005F70636351035f5E2Dcdf";
+export const GATE_ADDRESS = "0xA01F6Da1D0884ECB31674791146a6bCBa7D93D08";
+export const LEDGER_ADDRESS = "0x48D7e7cF2F6E5D36A842352Caf08f12A37e93588";
 
 // ---- gate reads ----
 export async function getAgreement(agreementId: string) {
@@ -83,6 +83,14 @@ export async function registerMeteredAgreement(
   });
 }
 
+export async function acceptAgreement(agreementId: string, textHash: string) {
+  return writeContract({
+    address: GATE_ADDRESS,
+    functionName: "accept_agreement",
+    args: [agreementId, textHash],
+  });
+}
+
 export async function submitOperation(
   agreementId: string,
   source: string,
@@ -147,7 +155,31 @@ export async function getEntitlementPaid(agreementId: string, entitlementId: str
   });
 }
 
+export async function getEscrow(agreementId: string) {
+  return readContract({
+    address: LEDGER_ADDRESS,
+    functionName: "get_escrow",
+    args: [agreementId],
+  });
+}
+
+export async function getSupply() {
+  return readContract({
+    address: LEDGER_ADDRESS,
+    functionName: "get_supply",
+    args: [],
+  });
+}
+
 // ---- ledger writes ----
+export async function fundEscrow(agreementId: string, amount: string) {
+  return writeContract({
+    address: LEDGER_ADDRESS,
+    functionName: "fund_escrow",
+    args: [agreementId, BigInt(amount)],
+  });
+}
+
 export async function settleOperation(opId: string) {
   return writeContract({
     address: LEDGER_ADDRESS,

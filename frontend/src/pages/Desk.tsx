@@ -4,7 +4,7 @@ import { Nav } from "../components/Nav";
 import { useWallet } from "../lib/useWallet";
 import {
   getAgreementCount, getOperationCount, getAgreement, getOperation, getSettlement,
-  getSchedule, getEntitlementPaid,
+  getSchedule, getEntitlementPaid, getEscrow, balanceOf, acceptAgreement, fundEscrow,
   submitOperation, settleOperation, escalate, syncFromGate, partyApprove,
 } from "../lib/contracts";
 import { stateMeta, settlementText } from "../lib/states";
@@ -12,6 +12,7 @@ import { stateMeta, settlementText } from "../lib/states";
 interface Agreement {
   id: string; title: string; agreement_text: string; authorized_sources: string;
   party_a: string; party_b: string; metered: boolean;
+  text_hash: string; accepted_a: boolean; accepted_b: boolean; active: boolean;
 }
 interface Operation {
   id: string; agreement_id: string; recipient: string; amount: string;
@@ -65,14 +66,14 @@ function toOp(oRaw: any, sRaw: any): Operation {
 
 // Retry a chain read with a short backoff. A transient RPC failure must never
 // be shown to the user as a real on-chain state.
-async function withRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, tries = 5): Promise<T> {
   let last: any = null;
   for (let i = 0; i < tries; i++) {
     try {
       return await fn();
     } catch (e) {
       last = e;
-      await new Promise((r) => setTimeout(r, 600 * (i + 1)));
+      if (i < tries - 1) await new Promise((r) => setTimeout(r, 700 * Math.pow(2, i)));
     }
   }
   throw last;
@@ -187,6 +188,12 @@ function SubmitForm({ agreementId, walletAddress, metered, onDone }: SubmitFormP
   );
 }
 
+// Hash the agreement text the browser is showing, exactly as the gate hashes it.
+async function sha256Hex(text: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function SkeletonOps({ count }: { count: number }) {
   return (
     <>
@@ -228,6 +235,7 @@ export function Desk() {
   const [agLoading, setAgLoading] = useState(true);
   const [opsLoading, setOpsLoading] = useState(true);
   const [error, setError] = useState("");
+  const [opsError, setOpsError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [settling, setSettling] = useState<string>("");
   const [settleMsg, setSettleMsg] = useState<Record<string, Msg>>({});
@@ -239,6 +247,14 @@ export function Desk() {
   const [meters, setMeters] = useState<Meter[]>([]);
   const [scheduleNote, setScheduleNote] = useState("");
   const [justSettled, setJustSettled] = useState<Record<string, boolean>>({});
+  const [localHash, setLocalHash] = useState("");
+  const [escrowBal, setEscrowBal] = useState<number | null>(null);
+  const [myBal, setMyBal] = useState<number | null>(null);
+  const [accepting, setAccepting] = useState(false);
+  const [acceptMsg, setAcceptMsg] = useState<Msg | null>(null);
+  const [fundAmt, setFundAmt] = useState("");
+  const [funding, setFunding] = useState(false);
+  const [fundMsg, setFundMsg] = useState<Msg | null>(null);
   const opsRef = useRef<Operation[]>([]);
   useEffect(() => { opsRef.current = ops; }, [ops]);
 
@@ -270,8 +286,9 @@ export function Desk() {
 
   async function loadOps() {
     setOpsLoading(true);
+    setOpsError("");
     try {
-      const opCount = Number(await getOperationCount());
+      const opCount = Number(await withRetry(() => getOperationCount()));
       const opIds = Array.from({ length: opCount }, (_, i) => String(i + 1));
       const operations: Operation[] = [];
       for (const id of opIds) {
@@ -280,7 +297,7 @@ export function Desk() {
       flagChanges(operations);
       setOps(operations);
     } catch (e: any) {
-      setError(String(e?.message || e));
+      setOpsError(String(e?.message || e));
     } finally {
       setOpsLoading(false);
     }
@@ -320,7 +337,7 @@ export function Desk() {
 
   function refreshMeters() {
     const ag = agreements.find((a) => a.id === selected);
-    if (ag) loadMeters(ag.id, ag.metered);
+    if (ag) { loadMeters(ag.id, ag.metered); loadBacking(ag.id); }
   }
 
   function pollOp(opId: string, onResolved: () => void) {
@@ -343,9 +360,9 @@ export function Desk() {
   async function loadAll() {
     setError("");
     try {
-      const agCount = Number(await getAgreementCount());
+      const agCount = Number(await withRetry(() => getAgreementCount()));
       const agIds = Array.from({ length: agCount }, (_, i) => String(i + 1));
-      const agResults = await Promise.all(agIds.map((id) => getAgreement(id)));
+      const agResults = await Promise.all(agIds.map((id) => withRetry(() => getAgreement(id))));
       const ags: Agreement[] = agResults.map((raw) => {
         const a = plain(raw);
         return {
@@ -354,6 +371,10 @@ export function Desk() {
           authorized_sources: String(a.authorized_sources),
           party_a: String(a.party_a), party_b: String(a.party_b),
           metered: a.metered === true,
+          text_hash: String(a.text_hash ?? ""),
+          accepted_a: a.accepted_a === true,
+          accepted_b: a.accepted_b === true,
+          active: a.active === true,
         };
       });
       setAgreements(ags);
@@ -464,6 +485,74 @@ export function Desk() {
     }
   }
 
+  async function loadBacking(aid: string) {
+    try { setEscrowBal(Number(plain(await withRetry(() => getEscrow(aid))))); } catch (_) { setEscrowBal(null); }
+    if (address) {
+      try { setMyBal(Number(plain(await withRetry(() => balanceOf(address))))); } catch (_) { setMyBal(null); }
+    } else {
+      setMyBal(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!current) { setLocalHash(""); setEscrowBal(null); return; }
+    loadBacking(current.id);
+    let alive = true;
+    sha256Hex(current.agreement_text)
+      .then((h) => { if (alive) setLocalHash(h); })
+      .catch(() => { if (alive) setLocalHash(""); });
+    return () => { alive = false; };
+  }, [current?.id, current?.agreement_text, address]);
+
+  async function doAccept() {
+    if (!current || !address) { setAcceptMsg({ kind: "bad", text: "Connect the wallet of a named party first." }); return; }
+    setAccepting(true);
+    try {
+      const h = await sha256Hex(current.agreement_text);
+      if (h !== current.text_hash) {
+        setAcceptMsg({ kind: "bad", text: "The text shown does not hash to the locked text hash. Not accepting." });
+        return;
+      }
+      setAcceptMsg({ kind: "busy", text: "Accepting the locked text, bound by its SHA-256 hash. Sign in your wallet…" });
+      await acceptAgreement(current.id, h);
+      setAcceptMsg({ kind: "ok", text: "Accepted. Refreshing…" });
+      await loadAll();
+    } catch (e: any) {
+      if (e?.pending) {
+        setAcceptMsg({ kind: "busy", text: "Submitted on-chain, finalizing… reload in a few seconds." });
+      } else {
+        setAcceptMsg({ kind: "bad", text: "Failed: " + String(e?.message || e) });
+      }
+    } finally {
+      setAccepting(false);
+    }
+  }
+
+  async function doFund() {
+    if (!current || !address) { setFundMsg({ kind: "bad", text: "Connect a wallet first." }); return; }
+    const amt = fundAmt.trim();
+    if (!/^[0-9]+$/.test(amt) || Number(amt) <= 0) { setFundMsg({ kind: "bad", text: "Enter a whole GEN amount." }); return; }
+    setFunding(true);
+    setFundMsg({ kind: "busy", text: "Moving your balance into this agreement's escrow. Sign in your wallet…" });
+    try {
+      await fundEscrow(current.id, amt);
+      setFundMsg({ kind: "ok", text: "Funded. Refreshing…" });
+      setFundAmt("");
+      await loadBacking(current.id);
+    } catch (e: any) {
+      if (e?.pending) {
+        setFundMsg({ kind: "busy", text: "Submitted on-chain, finalizing… this updates shortly." });
+        setTimeout(() => { loadBacking(current.id); }, 8000);
+      } else {
+        setFundMsg({ kind: "bad", text: "Failed: " + String(e?.message || e) });
+      }
+    } finally {
+      setFunding(false);
+    }
+  }
+
+  const myAccepted = !!current && (me === current.party_a.toLowerCase() ? current.accepted_a : me === current.party_b.toLowerCase() ? current.accepted_b : false);
+
   function pct(n: number, cap: number): string {
     if (cap <= 0) return "0%";
     return Math.max(0, Math.min(100, (n / cap) * 100)) + "%";
@@ -473,7 +562,12 @@ export function Desk() {
     <div className="page desk-page">
       <Nav showWallet={true} />
       <div className="content desk-content">
-        {error && <div className="err">Error: {error}</div>}
+        {error && (
+          <div className="err">
+            Error: {error}
+            <button className="act-btn" style={{ marginLeft: 12 }} onClick={() => { loadAll(); }}>Retry</button>
+          </div>
+        )}
         {agLoading && !error && (
           <div className="grid">
             <div className="panel">
@@ -497,7 +591,7 @@ export function Desk() {
               <div className="list-head">Agreements</div>
               {agreements.map((a) => (
                 <div key={a.id} className={"ag-item" + (a.id === selected ? " active" : "")} onClick={() => { setSelected(a.id); setShowForm(false); }}>
-                  <div className="ag-id">AGREEMENT {a.id}{a.metered ? " · METERED" : ""}</div>
+                  <div className="ag-id">AGREEMENT {a.id}{a.metered ? " · METERED" : ""}{a.active ? "" : " · PENDING"}</div>
                   <div className="ag-title">{a.title}</div>
                   <div className="ag-snip">{a.agreement_text}</div>
                 </div>
@@ -518,6 +612,38 @@ export function Desk() {
                     <div><div className="meta-k">Party A</div><div className="meta-v">{short(current.party_a)}</div></div>
                     <div><div className="meta-k">Party B</div><div className="meta-v">{short(current.party_b)}</div></div>
                     <div><div className="meta-k">Authorized source</div><div className="meta-v">{short(current.authorized_sources)}</div></div>
+                  </div>
+
+                  <div className={"accept-panel" + (current.active ? " is-active" : "")}>
+                    <div className="accept-head">
+                      <span className={"accept-badge " + (current.active ? "on" : "off")}>{current.active ? "Active" : "Pending acceptance"}</span>
+                      <span className="accept-sub">
+                        Text hash {current.text_hash ? current.text_hash.slice(0, 10) + "…" + current.text_hash.slice(-6) : "unavailable"}
+                        {localHash ? (localHash === current.text_hash ? " · matches the text shown above" : " · does NOT match the text shown above") : ""}
+                      </span>
+                    </div>
+                    <div className="accept-row">
+                      <div><div className="meta-k">Party A</div><div className={"meta-v " + (current.accepted_a ? "yes" : "no")}>{current.accepted_a ? "Accepted" : "Not yet accepted"}</div></div>
+                      <div><div className="meta-k">Party B</div><div className={"meta-v " + (current.accepted_b ? "yes" : "no")}>{current.accepted_b ? "Accepted" : "Not yet accepted"}</div></div>
+                      <div><div className="meta-k">Escrow backing</div><div className="meta-v">{escrowBal === null ? "…" : escrowBal + " GEN"}</div></div>
+                    </div>
+                    {!current.active && (
+                      <div className="gate-note">This agreement cannot govern payouts until both named parties accept the text above, bound by its SHA-256 hash.</div>
+                    )}
+                    {!current.active && isParty && !myAccepted && (
+                      <div className="fund-row">
+                        <button className="act-btn solid" onClick={doAccept} disabled={accepting}>{accepting ? "Accepting…" : "Accept this exact text"}</button>
+                      </div>
+                    )}
+                    {current.active && address && (
+                      <div className="fund-row">
+                        <input value={fundAmt} onChange={(e) => setFundAmt(e.target.value)} placeholder="GEN" />
+                        <button className="act-btn" onClick={doFund} disabled={funding}>{funding ? "Funding…" : "Fund escrow"}</button>
+                        <span className="fund-note">your balance: {myBal === null ? "…" : myBal + " GEN"}</span>
+                      </div>
+                    )}
+                    {acceptMsg && <div className="fund-row"><span className={"settle-msg " + acceptMsg.kind}>{acceptMsg.text}</span></div>}
+                    {fundMsg && <div className="fund-row"><span className={"settle-msg " + fundMsg.kind}>{fundMsg.text}</span></div>}
                   </div>
 
                   {current.metered && (
@@ -555,9 +681,13 @@ export function Desk() {
 
                   <div className="ops-bar">
                     <div className="ops-head">Operations under this agreement</div>
-                    <button className="act-btn" onClick={() => setShowForm((s) => !s)}>
-                      {showForm ? "Close" : "+ Submit operation"}
-                    </button>
+                    {current.active ? (
+                      <button className="act-btn" onClick={() => setShowForm((s) => !s)}>
+                        {showForm ? "Close" : "+ Submit operation"}
+                      </button>
+                    ) : (
+                      <span className="fund-note">Submitting opens once both parties accept.</span>
+                    )}
                   </div>
 
                   {showForm && (
@@ -570,13 +700,20 @@ export function Desk() {
                   )}
 
                   {opsLoading && currentOps.length === 0 && <SkeletonOps count={3} />}
-                  {!opsLoading && currentOps.length === 0 && (
+                  {!opsLoading && opsError && (
+                    <div className="ops-empty">
+                      <div className="ops-empty-title">Could not read operations</div>
+                      <div className="ops-empty-text">{opsError}</div>
+                      <button className="act-btn" onClick={() => { loadOps().then(() => refreshMeters()); }}>Retry</button>
+                    </div>
+                  )}
+                  {!opsLoading && !opsError && currentOps.length === 0 && (
                     <div className="ops-empty">
                       <div className="ops-empty-title">No operations yet</div>
                       <div className="ops-empty-text">
                         Submit a payout under this agreement. The gate maps it to the entitlement it discharges{current.metered ? " and meters the amount against the schedule" : ""} before anything can settle.
                       </div>
-                      {!showForm && <button className="act-btn" onClick={() => setShowForm(true)}>+ Submit the first operation</button>}
+                      {!showForm && current.active && <button className="act-btn" onClick={() => setShowForm(true)}>+ Submit the first operation</button>}
                     </div>
                   )}
 
