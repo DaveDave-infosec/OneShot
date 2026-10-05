@@ -9,8 +9,8 @@ The surrounding guards, pairing, state determination, arithmetic, reservation
 and value movement are real, so each test exercises the true code path, not a
 reimplementation.
 
-**62 tests, no skips.** 17 V1 tests (unchanged, the regression proof) and 45 V2
-tests.
+**83 tests, no skips.** 17 V1 tests (the regression proof), 45 V2 tests, and 21
+steward-round tests.
 
 ## Run
 
@@ -165,6 +165,53 @@ offline.
 - **bystander_settles_partial_exactly**: settlement of a PARTIAL stays
   permissionless and exact.
 
+## Steward round: what each test proves
+
+### tests/test_acceptance.py: two-party acceptance of the locked text (10)
+
+- **new_agreement_starts_pending_with_text_hash**: a new agreement is pending,
+  with neither party accepted, and stores the SHA-256 hash of its exact text.
+- **submit_on_pending_agreement_reverts**: a pending agreement cannot govern a
+  payout, and no operation is recorded.
+- **one_party_alone_cannot_activate**: unilateral activation fails. Party A
+  accepting alone leaves the agreement pending, and a submit still reverts.
+- **both_parties_activate_and_submit_works**: once both parties accept, the
+  agreement is active and governs payouts.
+- **party_b_first_then_a_activates**: acceptance order does not matter.
+- **non_party_cannot_accept**: a non-party acceptance reverts.
+- **wrong_text_hash_reverts**: accepting with any hash other than that of the
+  locked text reverts. A party must accept the exact text.
+- **double_acceptance_reverts**: a party cannot accept twice.
+- **same_address_as_both_parties_rejected**: one wallet cannot be named as both
+  parties, so activation can never be unilateral. Registration reverts before
+  anything is written.
+- **metered_agreement_pending_until_both_accept**: metered agreements follow the
+  same rule.
+
+### tests/test_asset_model.py: scarce issuance and escrow backing (11)
+
+- **issuer_mints_into_own_treasury**: the issuer mints within the cap, into its
+  own balance only.
+- **bystander_cannot_mint**: unauthorized minting fails. A bystander mint
+  reverts and nothing is issued.
+- **party_cannot_mint_itself_a_balance**: unauthorized minting fails. A named
+  party or recipient cannot mint itself a balance.
+- **issuer_cannot_exceed_max_supply**: issuance past `max_supply` reverts.
+- **mint_has_no_recipient_path**: there is no way to mint into a vault, an
+  escrow, or a recipient.
+- **transfer_moves_only_own_balance**: transfer is caller-bound; an
+  insufficient balance reverts.
+- **fund_escrow_on_pending_agreement_reverts**: a pending agreement cannot be
+  funded.
+- **fund_escrow_moves_caller_balance**: funding moves the caller's own balance
+  into the agreement's escrow.
+- **escrow_isolation_between_agreements**: agreement 1 cannot be paid from
+  agreement 2's escrow.
+- **underfunded_escrow_refuses_payout**: an escrow below the payout refuses it,
+  and nothing moves.
+- **supply_invariant_across_full_flow**: across mint, transfer, funding and
+  settlement, every unit issued is accounted for.
+
 ## Harness notes
 
 - Runner: `gltest` direct in-process runner (`from gltest.direct import ...`).
@@ -181,3 +228,13 @@ offline.
   routes those calls to the hook. Contract `assert` failures surface as
   `AssertionError` and are asserted with `pytest.raises(AssertionError)`.
 - The SDK is pinned to `v0.2.16` in `tests/conftest.py`.
+
+- Agreements are activated in tests through a shared `activate` helper in
+  `tests/conftest.py` (both parties accept the stored text hash). Ledger tests
+  fund escrow through `fund`, which the issuer runs as the first step inside the
+  test's own activation block.
+- Two behaviors of the direct runner shape the suite. It cannot make
+  cross-contract calls in a second `vm.activate()` block once one has closed,
+  so each test uses exactly one. And it does not roll back state when a call
+  reverts, so the contracts validate everything before writing anything, and the
+  tests assert that nothing was recorded after a revert.

@@ -131,7 +131,7 @@ against the locked text. Every row below is readable by anyone through
 | 5 | Bring the documentation fee paid to date up to 3 GEN in total | 3 | cumulative | `CONFIRMED_NEW` | 1 | 0 |
 
 Ops 1 and 2 are settled on the live ledger: the recipient holds exactly 10 GEN,
-the vault exactly 90, and the ledger's M2 paid counter reads 10, exactly the
+agreement 1's escrow exactly 90, and the ledger's M2 paid counter reads 10, exactly the
 cap. Op 2's residual of 2 is held, with the ledger note explaining why.
 
 Each verdict carries the validators' reasoning and a minority note. On op 2 the
@@ -139,6 +139,54 @@ validators recorded the opposite reading (could the 5 be cumulative?) and
 rejected it for lack of running-total wording. On op 5 they recorded the
 incremental reading and rejected it on the explicit "paid to date ... in total"
 phrasing.
+
+---
+
+## Steward round: scarce asset, escrow backing, two-party acceptance
+
+The V2 review asked for three things. Each is now in the contracts, covered by
+tests, and proven live.
+
+**1. Restricted, scarce issuance.** The ledger is deployed with a hard
+`max_supply`, and the deployer is the only issuer. `mint(amount)` has no
+recipient argument: only the issuer can call it, it credits only the issuer's
+own treasury, and total issuance can never exceed the cap. Nothing can be minted
+into an escrow, a vault, or a recipient. Value reaches them only by moving
+existing balance, through the caller-bound `transfer`, through `fund_escrow`, or
+through settlement. The old public vault is gone.
+
+**2. Escrow-backed settlement.** Each agreement has its own escrow.
+`fund_escrow` moves the caller's own balance into it, and only once the
+agreement is active. Every payout (V1, metered, final-hold release, residual
+release) draws only from the escrow of the operation's own agreement, so one
+agreement can never be paid from another's funds, and an agreement can never pay
+out more than was escrowed for it. Invariant: the sum of all balances and
+escrows always equals total issued, which never exceeds `max_supply`.
+
+**3. Both named parties must accept the locked text.** Every new agreement
+starts pending and is stored with the SHA-256 hash of its text.
+`accept_agreement(agreement_id, text_hash)` accepts only from party A or party
+B, only with the exact hash, and only once each. The agreement becomes active
+only when both have accepted; until then, submitting an operation or funding its
+escrow reverts. One address cannot be both parties, so activation can never be
+unilateral. The Desk hashes the text it displays, in the browser, and refuses to
+accept if that hash does not match the one on-chain.
+
+### Steward-round live proofs (GenLayer Studio)
+
+On the steward-round pair, agreement 1 names two different wallets as party A
+and party B.
+
+- After party A alone accepted, a payout submitted from the authorized source
+  **reverted on-chain**: "agreement is pending: both named parties must accept
+  it before it can govern payouts".
+- Party B, a named party but not the issuer, called `mint`, and it **reverted
+  on-chain**: "only the issuer can mint". Total issued stayed 0.
+- After both parties accepted, the issuer minted 100 into its own treasury,
+  funded agreement 1's escrow with all 100, and ops 1 to 5 replayed with
+  identical verdicts.
+- Settling ops 1 and 2 moved exactly 10 from the escrow to the recipient:
+  escrow 90, recipient 10, M2 paid 10 against its cap of 10.
 
 ---
 
@@ -242,8 +290,8 @@ regression proof.
 
 | Contract | Address |
 |---|---|
-| Gate (V2) | `0xC769DcDAbb228e3568452B2F09a7cE9bD7075cA5` |
-| Ledger (V2) | `0x14419dAd62612038A005F70636351035f5E2Dcdf` |
+| Gate | `0xA01F6Da1D0884ECB31674791146a6bCBa7D93D08` |
+| Ledger | `0x48D7e7cF2F6E5D36A842352Caf08f12A37e93588` |
 
 The ledger is constructed with the gate address baked in, so the linkage is
 fixed on-chain and a bystander can verify any decision against the gate
@@ -251,6 +299,10 @@ directly.
 
 Superseded V1 pair: gate `0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49`, ledger
 `0x633EAC3F74cD645c8ECBe2F6284fFBf62FA1DC7f`.
+
+Superseded V2 pair (before the steward round): gate
+`0xC769DcDAbb228e3568452B2F09a7cE9bD7075cA5`, ledger
+`0x14419dAd62612038A005F70636351035f5E2Dcdf`.
 
 ---
 
@@ -274,6 +326,15 @@ Superseded V1 pair: gate `0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49`, ledger
   key and no external override.
 - **Locked governing text.** The agreement text is stored on-chain at
   registration and is the authority every verdict is judged against.
+- **Both parties accept the exact text.** No agreement governs a payout until
+  both named parties have accepted it, bound by the SHA-256 hash of its locked
+  text. One party, or one wallet named twice, can never activate it.
+- **Scarce, authorized issuance.** Only the issuer can mint, only into its own
+  treasury, and never beyond `max_supply`. No caller can mint into an escrow or
+  a recipient.
+- **Escrow-backed settlement.** Every payout draws from the escrow of its own
+  agreement, funded from real balance, so no agreement can pay from another's
+  funds or beyond what was escrowed.
 - **Full audit trail.** Every operation is recorded with its state, its
   metering figures, the validators' reasoning and a minority note on-chain.
 
@@ -295,6 +356,8 @@ Superseded V1 pair: gate `0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49`, ledger
   release a residual, or execute a metered final hold, the ledger pays it as
   agreed by both, outside the meter. That is the parties' decision, recorded
   on-chain, never an automatic one.
+- **Escrow cannot be withdrawn yet.** Unused escrow stays with its agreement. A
+  two-party reclaim of unused escrow is future work.
 - The forcing pass prefers to commit; the two-party release is the honest
   backstop for the rare true deadlock, and a disagreement stays frozen until the
   parties concur.
@@ -303,11 +366,13 @@ Superseded V1 pair: gate `0xd3eC9487aEa79655d7F7e62A2D4DE673f21a7b49`, ledger
 
 ## Tests
 
-**62 real-contract tests, no skips.** They drive the actual gate and ledger
-code paths on the `gltest` direct runner: the 17 V1 tests (unchanged, as the
+**83 real-contract tests, no skips.** They drive the actual gate and ledger
+code paths on the `gltest` direct runner: the 17 V1 tests (kept as the
 regression proof) plus 45 V2 tests covering schedule verification, the PARTIAL
 split, cumulative mode, the reservation race, redirects, metered escalation, the
-ledger cap guard, exact conservation, and the residual's two-party release. See
+ledger cap guard, exact conservation, and the residual's two-party release, plus
+21 steward-round tests proving that unauthorized minting and unilateral agreement
+activation fail, that escrows are isolated, and that supply is conserved. See
 **[TESTING.md](./TESTING.md)**.
 
 ---
